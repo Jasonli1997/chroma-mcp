@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
 Build or refresh a Chroma vector index from an Obsidian vault.
-
-Examples:
-  python scripts/obsidian.py --vault /path/to/vault --collection obsidian build
-  python scripts/obsidian.py --vault /path/to/vault --collection obsidian refresh --delete-removed
 """
 
 from __future__ import annotations
@@ -21,6 +17,7 @@ from typing import Dict, Iterable, List, Tuple
 from chromadb.api import EmbeddingFunction
 from chromadb.api.collection_configuration import CreateCollectionConfiguration
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 from src.chroma_mcp.server import get_chroma_client, mcp_known_embedding_functions
 
@@ -80,7 +77,8 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ssl",
         type=lambda x: x.lower() in ["true", "yes", "1", "t", "y"],
-        default=os.getenv("CHROMA_SSL", "true").lower() in ["true", "yes", "1", "t", "y"],
+        default=os.getenv("CHROMA_SSL", "true").lower()
+        in ["true", "yes", "1", "t", "y"],
     )
     parser.add_argument(
         "--dotenv-path",
@@ -134,14 +132,11 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("build", help="Build a full index (replaces existing docs)")
-    refresh_parser = subparsers.add_parser(
-        "refresh", help="Refresh only stale or missing documents"
+    subparsers.add_parser(
+        "build", help="Build a full index by replacing all existing embeddings"
     )
-    refresh_parser.add_argument(
-        "--delete-removed",
-        action="store_true",
-        help="Delete documents for files removed from the vault",
+    subparsers.add_parser(
+        "refresh", help="Refresh stale, add missing and removed deleted embeddings"
     )
 
     return parser
@@ -154,14 +149,14 @@ def get_embedding_function(name: str, kwargs: Dict | None) -> EmbeddingFunction:
     return cls()
 
 
-def iter_markdown_files(vault_path: str, include_exts: Iterable[str], exclude_dirs: Iterable[str]):
+def iter_markdown_files(
+    vault_path: str, include_exts: Iterable[str], exclude_dirs: Iterable[str]
+):
     include_exts = {ext.lower() for ext in include_exts}
     exclude_dirs = {d.lower() for d in exclude_dirs}
     for root, dirs, files in os.walk(vault_path):
         dirs[:] = [
-            d
-            for d in dirs
-            if d.lower() not in exclude_dirs and not d.startswith(".")
+            d for d in dirs if d.lower() not in exclude_dirs and not d.startswith(".")
         ]
         for name in files:
             ext = os.path.splitext(name)[1].lower()
@@ -238,7 +233,7 @@ def parse_scalar(value: str):
             return float(value)
         return int(value)
     except ValueError:
-        return value.strip('"\'')
+        return value.strip("\"'")
 
 
 def extract_tags(text: str, frontmatter: Dict) -> List[str]:
@@ -272,7 +267,9 @@ def build_heading_index(content: str) -> List[Tuple[int, str]]:
         if match:
             level = len(match.group(1))
             title = match.group(2).strip()
-            while stack and stack[-1][0] >= level:  # released from previous header level
+            while (
+                stack and stack[-1][0] >= level
+            ):  # released from previous header level
                 stack.pop()
             stack.append((level, title))  # keep "digging in"
             path = " > ".join([item[1] for item in stack])
@@ -296,6 +293,7 @@ def chunk_text(content: str, chunk_size: int, chunk_overlap: int) -> List[Chunk]
     if chunk_overlap >= chunk_size:
         raise ValueError("chunk_overlap must be smaller than chunk_size")
 
+    # TODO: handle tokens instead of characters
     heading_index = build_heading_index(content)
     chunks: List[Chunk] = []
     length = len(content)
@@ -352,19 +350,14 @@ def build_metadata(
         "source": "obsidian",
         "vault_name": os.path.basename(vault_path.rstrip(os.sep)),
         "vault_path": os.path.abspath(vault_path),
-        "file_abs_path": os.path.abspath(file_path),
         "file_rel_path": rel_path,
-        "file_name": os.path.basename(file_path),
-        "file_ext": os.path.splitext(file_path)[1].lower(),
         "file_title": title,
         "file_size": stat.st_size,
         "file_mtime": int(stat.st_mtime),
         "file_mtime_iso": datetime.fromtimestamp(stat.st_mtime).isoformat(),
         "file_hash": file_hash,
         "frontmatter": metadata_value(frontmatter),
-        "frontmatter_raw": fm_text,
         "tags": ",".join(tags),
-        "tag_count": len(tags),
         "chunk_index": chunk.index,
         "chunk_start": chunk.start,
         "chunk_end": chunk.end,
@@ -394,8 +387,12 @@ def add_documents(collection, documents, metadatas, ids, batch_size, dry_run: bo
 
 def build_index(args):
     client = get_chroma_client(args)
-    embedding_kwargs = json.loads(args.embedding_kwargs) if args.embedding_kwargs else None
-    embedding_function = get_embedding_function(args.embedding_function, embedding_kwargs)
+    embedding_kwargs = (
+        json.loads(args.embedding_kwargs) if args.embedding_kwargs else None
+    )
+    embedding_function = get_embedding_function(
+        args.embedding_function, embedding_kwargs
+    )
     config = CreateCollectionConfiguration(embedding_function=embedding_function)
     collection = client.get_or_create_collection(
         name=args.collection,
@@ -410,11 +407,11 @@ def build_index(args):
     documents: List[str] = []
     metadatas: List[Dict] = []
     ids: List[str] = []
-    
+
     # TODO: Different chunking strategy for jsonl files
-    for file_path in iter_markdown_files(
+    for file_path in tqdm(iter_markdown_files(
         args.vault, args.include_ext, DEFAULT_EXCLUDE_DIRS | set(args.exclude_dir)
-    ):
+    )):
         total_files += 1
         content = read_text(file_path)
         frontmatter, body, fm_text = parse_frontmatter(content)
@@ -442,22 +439,30 @@ def build_index(args):
             total_chunks += 1
 
         if len(documents) >= args.batch_size:
-            add_documents(collection, documents, metadatas, ids, args.batch_size, args.dry_run)
+            add_documents(
+                collection, documents, metadatas, ids, args.batch_size, args.dry_run
+            )
             documents, metadatas, ids = [], [], []
 
     if documents:
-        add_documents(collection, documents, metadatas, ids, args.batch_size, args.dry_run)
+        add_documents(
+            collection, documents, metadatas, ids, args.batch_size, args.dry_run
+        )
 
     print(
         f"Indexed {total_chunks} chunks from {total_files} files into collection '{args.collection}'."
     )
 
 
-def collect_collection_file_index(collection, page_size: int = 500) -> Dict[str, List[str]]:
+def collect_collection_file_index(
+    collection, page_size: int = 500
+) -> Dict[str, List[str]]:
     mapping: Dict[str, List[str]] = {}
     offset = 0
     while True:
-        result = collection.get(include=["metadatas", "ids"], limit=page_size, offset=offset)
+        result = collection.get(
+            include=["metadatas"], limit=page_size, offset=offset
+        )
         ids = result.get("ids") or []
         if not ids:
             break
@@ -472,7 +477,9 @@ def collect_collection_file_index(collection, page_size: int = 500) -> Dict[str,
 
 def refresh_index(args):
     client = get_chroma_client(args)
-    embedding_kwargs = json.loads(args.embedding_kwargs) if args.embedding_kwargs else None
+    embedding_kwargs = (
+        json.loads(args.embedding_kwargs) if args.embedding_kwargs else None
+    )
     embedding_fn = get_embedding_function(args.embedding_function, embedding_kwargs)
     config = CreateCollectionConfiguration(embedding_function=embedding_fn)
     collection = client.get_or_create_collection(
@@ -487,27 +494,29 @@ def refresh_index(args):
     )
     vault_rel_paths = {os.path.relpath(path, args.vault) for path in vault_files}
 
-    stale_files = 0
-    added_files = 0
-    total_chunks = 0
+    stale_files, added_files = 0, 0
+    total_chunks, deleted_chunks = 0, 0
 
-    for file_path in vault_files:
+    # File update/addition
+    for file_path in tqdm(vault_files):
         content = read_text(file_path)
         frontmatter, body, fm_text = parse_frontmatter(content)
         tags = extract_tags(body, frontmatter)
-        title = extract_title(body, frontmatter, file_path)
+        title = extract_title(file_path)
         file_hash = sha256_text(content)
         rel_path = os.path.relpath(file_path, args.vault)
 
         existing = collection.get(
-            where={"file_rel_path": rel_path}, include=["metadatas", "ids"]
+            where={"file_rel_path": rel_path}, include=["metadatas"]
         )
         existing_ids = existing.get("ids") or []
         existing_metas = existing.get("metadatas") or []
 
+        # Add
         if not existing_ids:
             added_files += 1
             need_update = True
+        # Update
         else:
             file_hashes = {meta.get("file_hash") for meta in existing_metas if meta}
             need_update = len(file_hashes) != 1 or file_hash not in file_hashes
@@ -540,21 +549,27 @@ def refresh_index(args):
             ids.append(build_doc_id(rel_path, chunk))
             total_chunks += 1
 
-        add_documents(collection, documents, metadatas, ids, args.batch_size, args.dry_run)
+        add_documents(
+            collection, documents, metadatas, ids, args.batch_size, args.dry_run
+        )
 
-    removed_files = 0
-    if args.delete_removed:
-        index = collect_collection_file_index(collection)
-        removed = [path for path in index.keys() if path not in vault_rel_paths]
-        removed_files = len(removed)
-        if removed and not args.dry_run:
-            for rel_path in removed:
-                collection.delete(where={"file_rel_path": rel_path})
+    # Chunks removal
+    index = collect_collection_file_index(collection)
+    removed = [
+        (path, chunk_ids)
+        for path, chunk_ids in index.items()
+        if path not in vault_rel_paths
+    ]
+    removed_files = len(removed)
+    if removed and not args.dry_run:
+        for rel_path, chunk_ids in removed:
+            collection.delete(where={"file_rel_path": rel_path})
+            deleted_chunks += len(chunk_ids)
 
     print(
-        "Refresh complete: "
-        f"{stale_files} stale, {added_files} new, {removed_files} removed, "
-        f"{total_chunks} chunks updated."
+        "Refresh complete:\n"
+        f"Files: {stale_files} stale, {added_files} new, {removed_files} removed\n"
+        f"Chunks: {total_chunks} chunks added/updated, {deleted_chunks} chunks deleted."
     )
 
 
@@ -567,7 +582,7 @@ def main():
         # re-parse args to read the updated environment variables
         parser = create_parser()
         args = parser.parse_args()
-        
+
     if args.command == "build":
         build_index(args)
     elif args.command == "refresh":
