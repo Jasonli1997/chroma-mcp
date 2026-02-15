@@ -19,6 +19,12 @@ from chromadb.api.collection_configuration import CreateCollectionConfiguration
 from dotenv import load_dotenv
 from tqdm import tqdm
 
+from scripts.backlink_utils import (
+    backlinks_hash,
+    build_reverse_link_index,
+    filter_entry_files,
+    rel_path_in_vault,
+)
 from src.chroma_mcp.server import get_chroma_client, mcp_known_embedding_functions
 
 DEFAULT_EXCLUDE_DIRS = {
@@ -36,6 +42,7 @@ DEFAULT_EXCLUDE_DIRS = {
 
 TAG_RE = re.compile(r"(?<![\w/])#([A-Za-z0-9_/-]+)")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+SOURCE = "obsidian"
 
 
 @dataclass
@@ -120,6 +127,12 @@ def create_parser() -> argparse.ArgumentParser:
         help="Directory names to exclude (repeatable)",
     )
     parser.add_argument(
+        "--entry-dir",
+        action="append",
+        default=[],
+        help="Vault-relative directories to index (repeatable). Defaults to entire vault.",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=32,
@@ -155,7 +168,7 @@ def iter_markdown_files(
     include_exts = {ext.lower() for ext in include_exts}
     exclude_dirs = {d.lower() for d in exclude_dirs}
     for root, dirs, files in os.walk(vault_path):
-        dirs[:] = [
+        dirs[:] = [  # mutate dir in-place to exclude
             d for d in dirs if d.lower() not in exclude_dirs and not d.startswith(".")
         ]
         for name in files:
@@ -339,15 +352,16 @@ def build_metadata(
     file_path: str,
     title: str,
     frontmatter: Dict,
-    fm_text: str,
     tags: List[str],
     chunk: Chunk,
     file_hash: str,
+    backlinks: List[str],
+    backlinks_digest: str,
 ) -> Dict:
-    rel_path = os.path.relpath(file_path, vault_path)
+    rel_path = rel_path_in_vault(vault_path, file_path)
     stat = os.stat(file_path)
     return {
-        "source": "obsidian",
+        "source": SOURCE,
         "vault_name": os.path.basename(vault_path.rstrip(os.sep)),
         "vault_path": os.path.abspath(vault_path),
         "file_rel_path": rel_path,
@@ -366,6 +380,9 @@ def build_metadata(
         "chunk_hash": sha256_text(chunk.text),
         "heading_path": chunk.heading_path,
         "content_length": len(chunk.text),
+        "backlink_count": len(backlinks),
+        "backlinks": json.dumps(backlinks, ensure_ascii=True),
+        "backlinks_hash": backlinks_digest,
     }
 
 
@@ -400,7 +417,22 @@ def build_index(args):
     )
 
     if args.command == "build" and not args.dry_run:
-        collection.delete(where={"source": "obsidian"})
+        collection.delete(where={"source": SOURCE})
+
+    vault_files = sorted(
+        iter_markdown_files(
+            args.vault, args.include_ext, DEFAULT_EXCLUDE_DIRS | set(args.exclude_dir)
+        )
+    )
+    entry_files = filter_entry_files(args.vault, vault_files, args.entry_dir)
+    entry_rel_paths = [rel_path_in_vault(args.vault, path) for path in entry_files]
+    reverse_link_index, link_diagnostics = build_reverse_link_index(
+        args.vault,
+        vault_files,
+        read_text,
+        parse_frontmatter,
+        target_rel_paths=entry_rel_paths,
+    )
 
     total_chunks = 0
     total_files = 0
@@ -409,16 +441,16 @@ def build_index(args):
     ids: List[str] = []
 
     # TODO: Different chunking strategy for jsonl files
-    for file_path in tqdm(iter_markdown_files(
-        args.vault, args.include_ext, DEFAULT_EXCLUDE_DIRS | set(args.exclude_dir)
-    )):
+    for file_path in tqdm(entry_files):
         total_files += 1
         content = read_text(file_path)
         frontmatter, body, fm_text = parse_frontmatter(content)
         tags = extract_tags(body, frontmatter)
         title = extract_title(file_path)
         file_hash = sha256_text(content)
-        rel_path = os.path.relpath(file_path, args.vault)
+        rel_path = rel_path_in_vault(args.vault, file_path)
+        backlinks = reverse_link_index.get(rel_path, [])
+        backlinks_digest = backlinks_hash(backlinks)
         chunks = chunk_text(body, args.chunk_size, args.chunk_overlap)
 
         for chunk in chunks:
@@ -429,10 +461,11 @@ def build_index(args):
                     file_path,
                     title,
                     frontmatter,
-                    fm_text,
                     tags,
                     chunk,
                     file_hash,
+                    backlinks,
+                    backlinks_digest,
                 )
             )
             ids.append(build_doc_id(rel_path, chunk))
@@ -452,6 +485,12 @@ def build_index(args):
     print(
         f"Indexed {total_chunks} chunks from {total_files} files into collection '{args.collection}'."
     )
+    print(
+        "Backlink diagnostics:\n"
+        f"resolved_links={link_diagnostics.resolved_links}, "
+        f"ambiguous_links={link_diagnostics.ambiguous_links}, "
+        f"unresolved_links={link_diagnostics.unresolved_links}"
+    )
 
 
 def collect_collection_file_index(
@@ -461,7 +500,10 @@ def collect_collection_file_index(
     offset = 0
     while True:
         result = collection.get(
-            include=["metadatas"], limit=page_size, offset=offset
+            where={"source": SOURCE},
+            include=["metadatas"],
+            limit=page_size,
+            offset=offset,
         )
         ids = result.get("ids") or []
         if not ids:
@@ -487,27 +529,38 @@ def refresh_index(args):
         configuration=config,
     )
 
-    vault_files = list(
+    vault_files = sorted(
         iter_markdown_files(
             args.vault, args.include_ext, DEFAULT_EXCLUDE_DIRS | set(args.exclude_dir)
         )
     )
-    vault_rel_paths = {os.path.relpath(path, args.vault) for path in vault_files}
+    entry_files = filter_entry_files(args.vault, vault_files, args.entry_dir)
+    entry_rel_paths = {rel_path_in_vault(args.vault, path) for path in entry_files}
+    reverse_link_index, link_diagnostics = build_reverse_link_index(
+        args.vault,
+        vault_files,
+        read_text,
+        parse_frontmatter,
+        target_rel_paths=entry_rel_paths,
+    )
 
     stale_files, added_files = 0, 0
     total_chunks, deleted_chunks = 0, 0
 
     # File update/addition
-    for file_path in tqdm(vault_files):
+    for file_path in tqdm(entry_files):
         content = read_text(file_path)
         frontmatter, body, fm_text = parse_frontmatter(content)
         tags = extract_tags(body, frontmatter)
         title = extract_title(file_path)
         file_hash = sha256_text(content)
-        rel_path = os.path.relpath(file_path, args.vault)
+        rel_path = rel_path_in_vault(args.vault, file_path)
+        backlinks = reverse_link_index.get(rel_path, [])
+        backlinks_digest = backlinks_hash(backlinks)
 
         existing = collection.get(
-            where={"file_rel_path": rel_path}, include=["metadatas"]
+            where={"$and": [{"source": SOURCE}, {"file_rel_path": rel_path}]},
+            include=["metadatas"],
         )
         existing_ids = existing.get("ids") or []
         existing_metas = existing.get("metadatas") or []
@@ -519,14 +572,24 @@ def refresh_index(args):
         # Update
         else:
             file_hashes = {meta.get("file_hash") for meta in existing_metas if meta}
-            need_update = len(file_hashes) != 1 or file_hash not in file_hashes
+            backlinks_hashes = {
+                meta.get("backlinks_hash") for meta in existing_metas if meta
+            }
+            need_update = (
+                len(file_hashes) != 1
+                or file_hash not in file_hashes
+                or len(backlinks_hashes) != 1
+                or backlinks_digest not in backlinks_hashes
+            )
 
         if not need_update:
             continue
 
         stale_files += 1
         if not args.dry_run and existing_ids:
-            collection.delete(where={"file_rel_path": rel_path})
+            collection.delete(
+                where={"$and": [{"source": SOURCE}, {"file_rel_path": rel_path}]}
+            )
 
         chunks = chunk_text(body, args.chunk_size, args.chunk_overlap)
         documents = []
@@ -540,10 +603,11 @@ def refresh_index(args):
                     file_path,
                     title,
                     frontmatter,
-                    fm_text,
                     tags,
                     chunk,
                     file_hash,
+                    backlinks,
+                    backlinks_digest,
                 )
             )
             ids.append(build_doc_id(rel_path, chunk))
@@ -558,18 +622,26 @@ def refresh_index(args):
     removed = [
         (path, chunk_ids)
         for path, chunk_ids in index.items()
-        if path not in vault_rel_paths
+        if path not in entry_rel_paths
     ]
     removed_files = len(removed)
     if removed and not args.dry_run:
         for rel_path, chunk_ids in removed:
-            collection.delete(where={"file_rel_path": rel_path})
+            collection.delete(
+                where={"$and": [{"source": SOURCE}, {"file_rel_path": rel_path}]}
+            )
             deleted_chunks += len(chunk_ids)
 
     print(
         "Refresh complete:\n"
         f"Files: {stale_files} stale, {added_files} new, {removed_files} removed\n"
         f"Chunks: {total_chunks} chunks added/updated, {deleted_chunks} chunks deleted."
+    )
+    print(
+        "Backlink diagnostics:\n"
+        f"resolved_links={link_diagnostics.resolved_links}, "
+        f"ambiguous_links={link_diagnostics.ambiguous_links}, "
+        f"unresolved_links={link_diagnostics.unresolved_links}"
     )
 
 
