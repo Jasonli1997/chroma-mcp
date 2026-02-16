@@ -379,6 +379,7 @@ def build_vault_index_state(args) -> VaultIndexState:
     entry_files = filter_entry_files(args.vault, vault_files, args.entry_dir)
     entry_rel_paths = {rel_path_in_vault(args.vault, path) for path in entry_files}
     rel_to_abs_path = {rel_path_in_vault(args.vault, path): path for path in vault_files}
+    # Each entry file has a one-to-many relationship with its backlinks
     reverse_link_index, link_diagnostics = build_reverse_link_index(
         args.vault,
         vault_files,
@@ -466,6 +467,8 @@ def build_entry_records(
             chunk_file_cache,
         )
         for chunk in backlink_file.chunks:
+            if entry_file.rel_path not in chunk.text:
+                continue
             documents.append(chunk.text)
             metadatas.append(
                 build_metadata(
@@ -486,7 +489,9 @@ def build_entry_records(
                 )
             )
             ids.append(
-                build_backlink_doc_id(entry_file.rel_path, backlink_file.rel_path, chunk)
+                build_backlink_doc_id(
+                    entry_file.rel_path, backlink_file.rel_path, chunk
+                )
             )
             total_chunks += 1
 

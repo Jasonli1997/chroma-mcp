@@ -157,7 +157,7 @@ def build_index(args) -> None:
     if args.command == "build" and not args.dry_run:
         collection.delete(where={"source": SOURCE})
 
-    state = build_vault_index_state(args)
+    state = build_vault_index_state(args)  # build a snapshot of the vault
     total_chunks = 0
     total_files = 0
     documents = []
