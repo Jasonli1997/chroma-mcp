@@ -4,8 +4,7 @@ import hashlib
 import os
 import re
 from dataclasses import dataclass
-from typing import Iterable
-from typing import Callable
+from typing import Callable, Iterable
 
 WIKILINK_RE = re.compile(r"\[\[([^\[\]]+)\]\]")
 
@@ -73,9 +72,11 @@ def resolve_wikilink_target(
     if not target_key:
         return None, False
 
+    # Explicit path lookup
     if "/" in target_key:
         return canonical_to_rel_path.get(target_key), False
 
+    # Ambiguous path(s) lookup
     candidates = basename_to_rel_paths.get(target_key, [])
     if len(candidates) == 1:
         return candidates[0], False
@@ -88,7 +89,7 @@ def build_reverse_link_index(
     vault_path: str,
     vault_files: list[str],
     read_text: Callable[[str], str],
-    parse_frontmatter: Callable[[str], tuple[dict, str, str]],
+    parse_frontmatter: Callable[[str], tuple],
     target_rel_paths: Iterable[str] | None = None,
 ) -> tuple[dict[str, list[str]], LinkGraphDiagnostics]:
     target_filter = set(target_rel_paths or [])
@@ -104,7 +105,7 @@ def build_reverse_link_index(
     for source_file_path in vault_files:
         source_rel_path = rel_path_in_vault(vault_path, source_file_path)
         content = read_text(source_file_path)
-        _, body, _ = parse_frontmatter(content)
+        _, body = parse_frontmatter(content)
         for raw_target in extract_wikilink_targets(body):
             target_rel_path, ambiguous = resolve_wikilink_target(
                 raw_target, canonical_to_rel_path, basename_to_rel_paths
@@ -121,6 +122,7 @@ def build_reverse_link_index(
             else:
                 diagnostics.unresolved_links += 1
 
+    # Sort for refresing index
     sorted_backlinks_by_target: dict[str, list[str]] = {}
     for target_rel_path, source_rel_paths in backlinks_by_target.items():
         sorted_backlinks_by_target[target_rel_path] = sorted(source_rel_paths)
