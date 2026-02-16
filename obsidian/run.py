@@ -158,13 +158,11 @@ def build_index(args) -> None:
         collection.delete(where={"source": SOURCE})
 
     state = build_vault_index_state(args)  # build a snapshot of the vault
-    total_chunks = 0
-    total_files = 0
+    total_chunks, total_files = 0, 0
     documents = []
     metadatas = []
     ids = []
-    chunk_file_cache = {}
-    file_hash_cache = {}
+    chunk_file_cache, file_hash_cache = {}, {}
 
     for file_path in tqdm(state.entry_files):
         total_files += 1
@@ -214,8 +212,7 @@ def refresh_index(args) -> None:
     state = build_vault_index_state(args)
     stale_files, added_files = 0, 0
     total_chunks, deleted_chunks = 0, 0
-    chunk_file_cache = {}
-    file_hash_cache = {}
+    chunk_file_cache, file_hash_cache = {}, {}
 
     for file_path in tqdm(state.entry_files):
         entry_ctx = build_entry_chunk_context(
