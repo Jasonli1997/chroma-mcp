@@ -4,16 +4,20 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Iterable, List, Tuple
 
 from obsidian.backlink_utils import (
-    LinkGraphDiagnostics,
     backlinks_hash,
     build_reverse_link_index,
     filter_entry_files,
     rel_path_in_vault,
+)
+from obsidian.schemas import (
+    Chunk,
+    EntryChunkContext,
+    ParsedFile,
+    VaultIndexState,
 )
 
 DEFAULT_EXCLUDE_DIRS = {
@@ -32,46 +36,6 @@ DEFAULT_EXCLUDE_DIRS = {
 TAG_RE = re.compile(r"(?<![\w/])#([A-Za-z0-9_/-]+)")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 SOURCE = "obsidian"
-
-
-@dataclass
-class Chunk:
-    text: str
-    start: int
-    end: int
-    start_line: int
-    end_line: int
-    index: int
-    heading_path: str
-
-
-@dataclass
-class ParsedFile:
-    path: str
-    rel_path: str
-    title: str
-    frontmatter: Dict
-    tags: List[str]
-    file_hash: str
-    chunks: List[Chunk]
-
-
-@dataclass
-class VaultIndexState:
-    vault_files: List[str]
-    entry_files: List[str]
-    entry_rel_paths: set[str]
-    rel_to_abs_path: Dict[str, str]
-    reverse_link_index: Dict[str, List[str]]
-    link_diagnostics: LinkGraphDiagnostics
-
-
-@dataclass
-class EntryChunkContext:
-    entry_file: ParsedFile
-    backlinks: List[str]
-    backlinks_digest: str
-    backlink_content_digest: str
 
 
 def iter_markdown_files(
@@ -263,36 +227,24 @@ def build_metadata(
     tags: List[str],
     chunk: Chunk,
     file_hash: str,
-    backlinks: List[str],
-    backlinks_digest: str,
-    backlink_content_digest: str,
-    chunk_kind: str = "primary",
-    chunk_source_path: str | None = None,
-    chunk_source_title: str | None = None,
-    chunk_source_hash: str | None = None,
+    backlinks: List[str] | None = None,
+    backlinks_digest: str | None = None,
+    backlink_content_digest: str | None = None,
+    entry_file_path: str | None = None,
 ) -> Dict:
-    if chunk_source_path is None:
-        chunk_source_path = file_path
-    if chunk_source_title is None:
-        chunk_source_title = title
-    if chunk_source_hash is None:
-        chunk_source_hash = file_hash
-
-    rel_path = rel_path_in_vault(vault_path, file_path)
-    chunk_source_rel_path = rel_path_in_vault(vault_path, chunk_source_path)
     stat = os.stat(file_path)
     return {
         "source": SOURCE,
         "vault_name": os.path.basename(vault_path.rstrip(os.sep)),
         "vault_path": os.path.abspath(vault_path),
-        "file_rel_path": rel_path,
+        "file_rel_path": rel_path_in_vault(vault_path, file_path),
         "file_title": title,
         "file_size": stat.st_size,
         "file_mtime": int(stat.st_mtime),
         "file_mtime_iso": datetime.fromtimestamp(stat.st_mtime).isoformat(),
         "file_hash": file_hash,
-        "frontmatter": metadata_value(frontmatter),
-        "tags": ",".join(tags),
+        "file_frontmatter": metadata_value(frontmatter),
+        "file_tags": ",".join(tags),
         "chunk_index": chunk.index,
         "chunk_start": chunk.start,
         "chunk_end": chunk.end,
@@ -301,14 +253,13 @@ def build_metadata(
         "chunk_hash": sha256_text(chunk.text),
         "heading_path": chunk.heading_path,
         "content_length": len(chunk.text),
-        "backlink_count": len(backlinks),
-        "backlinks": json.dumps(backlinks, ensure_ascii=True),
+        "file_backlink_count": len(backlinks) if backlinks is not None else None,
+        "file_backlinks": (
+            json.dumps(backlinks, ensure_ascii=True) if backlinks is not None else None
+        ),
         "backlinks_hash": backlinks_digest,
         "backlink_content_hash": backlink_content_digest,
-        "chunk_kind": chunk_kind,
-        "chunk_source_file_rel_path": chunk_source_rel_path,
-        "chunk_source_file_title": chunk_source_title,
-        "chunk_source_file_hash": chunk_source_hash,
+        "entry_file_path": entry_file_path,
     }
 
 
@@ -432,6 +383,7 @@ def build_entry_records(
     total_chunks = 0
 
     entry_file = entry_ctx.entry_file
+    # Record chunks from the given entry file
     for chunk in entry_file.chunks:
         documents.append(chunk.text)
         metadatas.append(
@@ -446,12 +398,12 @@ def build_entry_records(
                 entry_ctx.backlinks,
                 entry_ctx.backlinks_digest,
                 entry_ctx.backlink_content_digest,
-                chunk_kind="primary",
             )
         )
         ids.append(build_doc_id(entry_file.rel_path, chunk))
         total_chunks += 1
 
+    # Record chunks from backlinked files to the entry file
     for backlink_rel_path in entry_ctx.backlinks:
         if backlink_rel_path == entry_file.rel_path:
             continue
@@ -467,25 +419,20 @@ def build_entry_records(
             chunk_file_cache,
         )
         for chunk in backlink_file.chunks:
+            # Filter out irrelevant chunks
             if entry_file.rel_path not in chunk.text:
                 continue
             documents.append(chunk.text)
             metadatas.append(
                 build_metadata(
                     args.vault,
-                    entry_file.path,
-                    entry_file.title,
+                    backlink_file.path,
+                    backlink_file.title,
                     backlink_file.frontmatter,
                     backlink_file.tags,
                     chunk,
-                    entry_file.file_hash,
-                    entry_ctx.backlinks,
-                    entry_ctx.backlinks_digest,
-                    entry_ctx.backlink_content_digest,
-                    chunk_kind="backlink",
-                    chunk_source_path=backlink_file.path,
-                    chunk_source_title=backlink_file.title,
-                    chunk_source_hash=backlink_file.file_hash,
+                    backlink_file.file_hash,
+                    entry_file_path=entry_file.rel_path,
                 )
             )
             ids.append(
@@ -526,8 +473,19 @@ def collect_collection_file_index(
             break
         metadatas = result.get("metadatas") or []
         for doc_id, metadata in zip(ids, metadatas):
-            file_rel_path = metadata.get("file_rel_path") if metadata else None
-            if file_rel_path:
+            if metadata:
+                file_rel_path = metadata.get("file_rel_path")
+                backlinks_hash = metadata.get("backlinks_hash")
+                backlink_content_hash = metadata.get("backlink_content_hash")
+            else:
+                file_rel_path = backlinks_hash = backlink_content_hash = None
+
+            # Only track entry/primary records for removed-file cleanup
+            is_primary_record = (
+                backlinks_hash is not None and backlink_content_hash is not None
+            )
+
+            if file_rel_path and is_primary_record:
                 mapping.setdefault(file_rel_path, []).append(doc_id)
         offset += len(ids)
     return mapping
