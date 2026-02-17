@@ -1,14 +1,6 @@
 from dataclasses import dataclass
-from typing import Literal
 
 from obsidian.backlink_utils import LinkGraphDiagnostics
-
-ChunkKindValue = Literal["primary", "backlink"]
-
-
-class ChunkKind:
-    PRIMARY = "primary"
-    BACKLINK = "backlink"
 
 
 @dataclass
