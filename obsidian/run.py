@@ -140,6 +140,88 @@ def print_backlink_diagnostics(link_diagnostics) -> None:
     )
 
 
+def get_existing_entry_records(collection, rel_path: str):
+    ids = []
+    metadatas = []
+    seen_ids = set()
+
+    result = collection.get(
+        where={"$and": [{"source": SOURCE}, {"file_rel_path": rel_path}]},
+        include=["metadatas"],
+    )
+    result_ids = result.get("ids") or []
+    result_metas = result.get("metadatas") or []
+    for doc_id, metadata in zip(result_ids, result_metas):
+        if not is_primary_entry_metadata(metadata, rel_path):
+            continue
+        if doc_id in seen_ids:
+            continue
+        seen_ids.add(doc_id)
+        ids.append(doc_id)
+        metadatas.append(metadata)
+
+    return ids, metadatas
+
+
+def parse_backlinks_from_metadata(metadata) -> set[str]:
+    if not metadata:
+        return set()
+    raw_backlinks = metadata.get("file_backlinks")
+    if not raw_backlinks:
+        return set()
+    if isinstance(raw_backlinks, list):
+        return {str(path) for path in raw_backlinks if str(path)}
+    if isinstance(raw_backlinks, str):
+        try:
+            parsed = json.loads(raw_backlinks)
+            if isinstance(parsed, list):
+                return {str(path) for path in parsed if str(path)}
+        except json.JSONDecodeError:
+            return set()
+    return set()
+
+
+def is_primary_entry_metadata(metadata, rel_path: str) -> bool:
+    if not metadata:
+        return False
+    backlinks_hash = metadata.get("backlinks_hash")
+    backlink_content_hash = metadata.get("backlink_content_hash")
+    if backlinks_hash is None or backlink_content_hash is None:
+        return False
+    owner_rel_path = metadata.get("entry_file_path")
+    if not owner_rel_path:
+        return True
+    return owner_rel_path == rel_path
+
+
+def collect_backlink_ids_for_entry(
+    collection, entry_rel_path: str, backlink_rel_paths: set[str], page_size: int = 500
+) -> set[str]:
+    ids_to_delete: set[str] = set()
+    for backlink_rel_path in backlink_rel_paths:
+        offset = 0
+        while True:
+            result = collection.get(
+                where={"$and": [{"source": SOURCE}, {"file_rel_path": backlink_rel_path}]},
+                include=["metadatas"],
+                limit=page_size,
+                offset=offset,
+            )
+            ids = result.get("ids") or []
+            if not ids:
+                break
+            metadatas = result.get("metadatas") or []
+
+            for doc_id, metadata in zip(ids, metadatas):
+                if not metadata:
+                    continue
+                if metadata.get("entry_file_path") != entry_rel_path:
+                    continue
+                ids_to_delete.add(doc_id)
+            offset += len(ids)
+    return ids_to_delete
+
+
 def build_index(args) -> None:
     client = get_chroma_client(args)
     embedding_kwargs = (
@@ -154,6 +236,7 @@ def build_index(args) -> None:
         configuration=config,
     )
 
+    # Build from scratch
     if args.command == "build" and not args.dry_run:
         collection.delete(where={"source": SOURCE})
 
@@ -166,9 +249,7 @@ def build_index(args) -> None:
 
     for file_path in tqdm(state.entry_files):
         total_files += 1
-        entry_ctx = build_entry_chunk_context(
-            args, file_path, state, chunk_file_cache, file_hash_cache
-        )
+        entry_ctx = build_entry_chunk_context(args, file_path, state, chunk_file_cache, file_hash_cache)  # noqa: E501
         (
             entry_documents,
             entry_metadatas,
@@ -220,52 +301,73 @@ def refresh_index(args) -> None:
         )
         entry_file = entry_ctx.entry_file
 
-        existing = collection.get(
-            where={"$and": [{"source": SOURCE}, {"file_rel_path": entry_file.rel_path}]},
-            include=["metadatas"],
+        existing_ids, existing_metas = get_existing_entry_records(
+            collection, entry_file.rel_path
         )
-        existing_ids = existing.get("ids") or []
-        existing_metas = existing.get("metadatas") or []
-
+        # New entry file
         if not existing_ids:
             added_files += 1
             need_update = True
+
+        # Check if the file is stale using the hashes
         else:
-            file_hashes = {meta.get("file_hash") for meta in existing_metas if meta}
-            backlinks_hashes = {
-                meta.get("backlinks_hash") for meta in existing_metas if meta
-            }
-            backlink_content_hashes = {
-                meta.get("backlink_content_hash") for meta in existing_metas if meta
-            }
-            need_update = (
-                len(file_hashes) != 1
-                or entry_file.file_hash not in file_hashes
-                or len(backlinks_hashes) != 1
-                or entry_ctx.backlinks_digest not in backlinks_hashes
-                or len(backlink_content_hashes) != 1
-                or entry_ctx.backlink_content_digest not in backlink_content_hashes
-            )
+            if not existing_metas:
+                need_update = True
+            else:
+                file_hashes = set()
+                backlinks_hashes = set()
+                backlink_content_hashes = set()
+                for meta in existing_metas:
+                    file_hash = meta.get("file_hash")
+                    backlinks_hash = meta.get("backlinks_hash")
+                    backlink_content_hash = meta.get("backlink_content_hash")
+                    if file_hash is not None:
+                        file_hashes.add(file_hash)
+                    if backlinks_hash is not None:
+                        backlinks_hashes.add(backlinks_hash)
+                    if backlink_content_hash is not None:
+                        backlink_content_hashes.add(backlink_content_hash)
+
+                need_update = (
+                    len(file_hashes) != 1
+                    or entry_file.file_hash not in file_hashes
+                    or len(backlinks_hashes) != 1
+                    or entry_ctx.backlinks_digest not in backlinks_hashes
+                    or len(backlink_content_hashes) != 1
+                    or entry_ctx.backlink_content_digest not in backlink_content_hashes
+                )
 
         if not need_update:
             continue
 
-        stale_files += 1
-        if not args.dry_run and existing_ids:
-            collection.delete(
-                where={"$and": [{"source": SOURCE}, {"file_rel_path": entry_file.rel_path}]}
-            )
-
         documents, metadatas, ids, entry_total_chunks = build_entry_records(
             args, entry_ctx, state, chunk_file_cache
         )
+        stale_files += 1
         total_chunks += entry_total_chunks
+
+        # Remove entry file chunks and their backlinked chunks
+        if not args.dry_run:
+            ids_to_delete = set(existing_ids)
+            previous_backlinks: set[str] = set()
+            if existing_metas:
+                previous_backlinks = parse_backlinks_from_metadata(existing_metas[0])  # all existing_metas will have the same backlinks
+            backlinks_to_delete = previous_backlinks | set(entry_ctx.backlinks)
+            if backlinks_to_delete:
+                ids_to_delete.update(
+                    collect_backlink_ids_for_entry(
+                        collection, entry_file.rel_path, backlinks_to_delete
+                    )
+                )
+            if ids_to_delete: 
+                collection.delete(ids=list(ids_to_delete))
 
         add_documents(
             collection, documents, metadatas, ids, args.batch_size, args.dry_run
         )
 
-    index = collect_collection_file_index(collection, source=SOURCE)
+    # Remove deleted chunks
+    index = collect_collection_file_index(collection, source=SOURCE)  # only collect entry files for index
     removed = [
         (path, chunk_ids)
         for path, chunk_ids in index.items()
@@ -274,10 +376,22 @@ def refresh_index(args) -> None:
     removed_files = len(removed)
     if removed and not args.dry_run:
         for rel_path, chunk_ids in removed:
-            collection.delete(
-                where={"$and": [{"source": SOURCE}, {"file_rel_path": rel_path}]}
-            )
-            deleted_chunks += len(chunk_ids)
+            _, removed_metas = get_existing_entry_records(collection, rel_path)
+            removed_backlinks: set[str] = set()
+            for metadata in removed_metas:
+                removed_backlinks.update(parse_backlinks_from_metadata(metadata))
+
+            ids_to_delete = set(chunk_ids)
+            if removed_backlinks:
+                ids_to_delete.update(
+                    collect_backlink_ids_for_entry(
+                        collection, rel_path, removed_backlinks
+                    )
+                )
+
+            if ids_to_delete:
+                collection.delete(ids=list(ids_to_delete))
+                deleted_chunks += len(ids_to_delete)
 
     print(
         "Refresh complete:\n"
