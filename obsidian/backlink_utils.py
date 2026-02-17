@@ -96,7 +96,7 @@ def build_reverse_link_index(
     canonical_to_rel_path, basename_to_rel_paths = build_note_maps(
         vault_path, vault_files
     )
-    backlinks_by_target: dict[str, set[str]] = {}
+    backlinks_by_target: dict[str, set[str]] = {}  # `value` set points to `key` file
     if target_filter:
         backlinks_by_target = {target: set() for target in target_filter}
 
@@ -115,7 +115,7 @@ def build_reverse_link_index(
                 if target_filter and target_rel_path not in target_filter:
                     continue
                 backlinks_by_target.setdefault(target_rel_path, set()).add(
-                    source_rel_path
+                    source_rel_path  # source_rel_path --> target_rel_path
                 )
             elif ambiguous:
                 diagnostics.ambiguous_links += 1
