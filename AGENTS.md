@@ -38,7 +38,3 @@ Practical workflow for AI/human contributors in this repo.
 - Address review comments in-thread with concrete responses.
 - For small requested fixes (docs wording, tiny code tweaks), apply directly and push updates.
 - For larger requests (multi-file refactor, design shifts), create a follow-up plan/issue instead of sneaking scope creep into a small PR.
-
-## Current Sprint Focus (Temporary)
-- For this sprint only, prioritize quality-of-life improvements: docs polish, dev/test ergonomics, and small reliability fixes.
-- This temporary focus does not change the permanent repo guidelines above.
