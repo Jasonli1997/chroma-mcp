@@ -157,6 +157,29 @@ This will create an HTTP client that connects to your self-hosted Chroma instanc
 
 Find reference usages, such as shared knowledge bases & adding memory to context windows in the [Chroma MCP Docs](https://docs.trychroma.com/integrations/frameworks/anthropic-mcp#using-chroma-with-claude)
 
+## Development quickstart
+
+This repo uses [uv](https://docs.astral.sh/uv/) for local development and testing.
+
+```bash
+# Install dev dependencies (including test extras)
+uv sync --extra test
+
+# Run tests
+uv run pytest tests/
+
+# Run lint checks
+uv run ruff check .
+```
+
+For convenience, you can also use the included Makefile shortcuts:
+
+```bash
+make setup
+make test
+make lint
+```
+
 ### Using Environment Variables
 
 You can also use environment variables to configure the client. The server will automatically load variables from a `.env` file located at the path specified by `--dotenv-path` (defaults to `.chroma_env` in the working directory) or from system environment variables. Command-line arguments take precedence over environment variables.
