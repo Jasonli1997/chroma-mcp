@@ -373,15 +373,24 @@ def main():
     # Validate required arguments based on client type
     if args.client_type == 'http':
         if not args.host:
-            parser.error("Host must be provided via --host flag or CHROMA_HOST environment variable when using HTTP client")
+            parser.error(
+                "HTTP client requires --host (or CHROMA_HOST). "
+                "Example: chroma-mcp --client-type http --host localhost --port 8000"
+            )
     
     elif args.client_type == 'cloud':
         if not args.tenant:
-            parser.error("Tenant must be provided via --tenant flag or CHROMA_TENANT environment variable when using cloud client")
+            parser.error(
+                "Cloud client requires --tenant (or CHROMA_TENANT)."
+            )
         if not args.database:
-            parser.error("Database must be provided via --database flag or CHROMA_DATABASE environment variable when using cloud client")
+            parser.error(
+                "Cloud client requires --database (or CHROMA_DATABASE)."
+            )
         if not args.api_key:
-            parser.error("API key must be provided via --api-key flag or CHROMA_API_KEY environment variable when using cloud client")
+            parser.error(
+                "Cloud client requires --api-key (or CHROMA_API_KEY)."
+            )
     
     # Initialize client with parsed args
     try:

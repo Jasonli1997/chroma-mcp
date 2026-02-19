@@ -245,7 +245,8 @@ def test_required_args_for_http_client():
         
         # Check that error was called for missing host
         mock_error.assert_called_with(
-            "Host must be provided via --host flag or CHROMA_HOST environment variable when using HTTP client"
+            "HTTP client requires --host (or CHROMA_HOST). "
+            "Example: chroma-mcp --client-type http --host localhost --port 8000"
         )
 
 def test_required_args_for_cloud_client():
@@ -261,9 +262,9 @@ def test_required_args_for_cloud_client():
         except:
             pass
         
-        # Check that error was called for missing api-key (the first check in the code)
+        # Check that error was called for the first missing required cloud arg (tenant)
         mock_error.assert_called_with(
-            "API key must be provided via --api-key flag or CHROMA_API_KEY environment variable when using cloud client"
+            "Cloud client requires --tenant (or CHROMA_TENANT)."
         )
 
 # --- Tests for chroma_update_documents ---
