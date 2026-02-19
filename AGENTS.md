@@ -5,27 +5,40 @@ Practical workflow for AI/human contributors in this repo.
 ## Scope
 - Prefer **small, reviewable QoL changes** over large refactors.
 - Keep changes narrowly scoped to the issue/plan item.
+- If work grows beyond a small PR, split into multiple PRs.
 
 ## Local workflow
-1. Create a feature branch from `main`.
-2. Make focused edits.
-3. Run tests before opening a PR:
-   - `uv run pytest`
-4. Open a PR with a concise summary and testing notes.
+1. Sync from latest `main`.
+2. Create a feature branch using a clear name (examples: `docs/...`, `chore/...`, `fix/...`).
+3. Make focused edits tied to one purpose.
+4. Run local checks before opening a PR:
+   - `uv sync --extra test`
+   - `uv run pytest tests/`
+   - `uv run ruff check .`
+5. Open a PR with concise summary + testing notes.
 
 ## Change guidelines
 - Avoid changing public behavior unless required.
 - Keep docs and implementation in sync.
 - Add tests for behavior changes; keep test additions minimal and targeted.
 - Prefer readability and maintainability over cleverness.
+- Preserve backward compatibility unless the PR explicitly proposes a breaking change.
 
 ## PR quality bar
 - Clear title (`docs: ...`, `chore: ...`, `fix: ...`).
-- Include:
+- Include in PR description:
   - What changed
   - Why it changed
   - How it was tested
-- Keep PR size small when possible.
+  - Any known limitations/blockers
+- Keep PR size small when possible (easy to review in one pass).
+- If CI/local checks are blocked by environment/tooling, state that explicitly.
 
-## Tonight's constraint
-Treat this pass as a quality-of-life sprint: docs polish, test/dev ergonomics, and small reliability improvements only.
+## Review + follow-up expectations
+- Address review comments in-thread with concrete responses.
+- For small requested fixes (docs wording, tiny code tweaks), apply directly and push updates.
+- For larger requests (multi-file refactor, design shifts), create a follow-up plan/issue instead of sneaking scope creep into a small PR.
+
+## Current sprint constraint (temporary)
+For the current sprint, prioritize quality-of-life improvements only: docs polish, dev/test ergonomics, and small reliability fixes.
+This is a **temporary execution constraint for this sprint**, not a permanent repo rule.
